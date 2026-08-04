@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Where is the shade?</title>
+<meta name="theme-color" content="#14333a" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500&family=Archivo+Black&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ink: #14333a;        /* deep shadow teal */
+    --bg: #edf3f2;         /* shaded concrete */
+    --card: #ffffff;
+    --sun: #f2a900;        /* sun amber — means "sun hits you" */
+    --sun-soft: #fcebc2;
+    --shade: #1f7a63;      /* cool shade green — means "you're safe" */
+    --shade-soft: #d8eee6;
+    --muted: #62787c;
+    --line: #d3dedd;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  .app { max-width: 430px; margin: 0 auto; padding: 20px 16px 48px; }
+
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  .awning {
+    width: 34px; height: 34px; border-radius: 8px; background: var(--ink);
+    display: grid; place-items: center; flex: none;
+  }
+  header h1 { font-family: "Archivo Black", sans-serif; font-size: 19px; letter-spacing: -0.3px; }
+  header p { font-size: 12.5px; color: var(--muted); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 12px; font-weight: 500; letter-spacing: 0.4px;
+          text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .field { margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; }
+  input[type="text"], input[type="datetime-local"] {
+    width: 100%; height: 44px; padding: 0 12px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--shade); outline-offset: 1px; }
+  .btn-locate {
+    flex: none; height: 44px; padding: 0 12px; font: inherit; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    color: var(--ink); cursor: pointer;
+  }
+  .btn-go {
+    width: 100%; height: 52px; border: 0; border-radius: 12px; cursor: pointer;
+    background: var(--ink); color: #fff;
+    font-family: "Archivo Black", sans-serif; font-size: 16px; letter-spacing: 0.3px;
+  }
+  .btn-go:disabled { opacity: 0.55; cursor: wait; }
+  .btn-demo {
+    width: 100%; margin-top: 8px; height: 40px; font: inherit; font-size: 14px;
+    background: none; border: 1px dashed var(--line); border-radius: 10px;
+    color: var(--muted); cursor: pointer;
+  }
+  .status { font-size: 13.5px; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
+  .status.err { color: #a33a2a; }
+
+  .trip-head { display: flex; justify-content: space-between; align-items: baseline;
+               margin: 4px 2px 10px; }
+  .trip-head h2 { font-family: "Archivo Black", sans-serif; font-size: 15px; }
+  .trip-head span { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Per-leg verdict — the signature block */
+  #result { display: none; }
+  .verdict { border-color: var(--ink); overflow: hidden; padding: 0; }
+  .verdict-head { padding: 16px 16px 4px; }
+  .leg-line { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .badge {
+    font-family: "Archivo Black", sans-serif; font-size: 13px; letter-spacing: 0.3px;
+    background: var(--ink); color: #fff; border-radius: 7px; padding: 3px 9px;
+  }
+  .leg-meta { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .verdict-word {
+    font-family: "Archivo Black", sans-serif; font-size: 42px; line-height: 1.05;
+    letter-spacing: -1px; color: var(--shade);
+  }
+  .verdict-word.even { color: var(--ink); font-size: 30px; }
+  .verdict-sub { font-size: 14.5px; color: var(--ink); padding: 0 16px 4px; }
+  .vehicle { display: flex; justify-content: center; padding: 8px 0 2px; }
+
+  .tl-wrap { padding: 8px 16px 16px; }
+  .tl-label { display: flex; justify-content: space-between; font-size: 12px;
+              color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 5px; }
+  .tl { display: flex; height: 14px; border-radius: 7px; overflow: hidden; }
+  .tl span { display: block; height: 100%; }
+  .legend { display: flex; gap: 14px; font-size: 12.5px; color: var(--muted); margin-top: 9px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+
+  #map { height: 300px; border-radius: 14px; border: 1px solid var(--line); }
+  .foot { font-size: 12px; color: var(--muted); margin-top: 12px; }
+  .foot a { color: var(--muted); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    #result.show .card { animation: rise 0.35s ease-out; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="awning" aria-hidden="true">
+      <svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="14" r="5" fill="#f2a900"/><rect x="0" y="0" width="20" height="9" rx="2" fill="#d8eee6"/></svg>
+    </div>
+    <div>
+      <h1>Where is the shade?</h1>
+      <p>Pick the cool side before you board</p>
+    </div>
+  </header>
+
+  <form class="card" id="form">
+    <div class="field">
+      <label for="from">From</label>
+      <div class="row">
+        <input type="text" id="from" placeholder="Current stop or address" autocomplete="off" />
+        <button type="button" class="btn-locate" id="locate" aria-label="Use my location">◎ Locate</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="to">To</label>
+      <input type="text" id="to" placeholder="Where are you headed?" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="depart">Departing</label>
+      <input type="datetime-local" id="depart" />
+    </div>
+    <button class="btn-go" id="go" type="submit">Find the shade</button>
+    <button class="btn-demo" id="demo" type="button">No route handy? Try a demo trip</button>
+    <p class="status" id="status" role="status"></p>
+  </form>
+
+  <div id="result">
+    <div class="trip-head">
+      <h2 id="trip-title">Your trip</h2>
+      <span id="trip-times"></span>
+    </div>
+    <div id="legs"></div>
+    <div id="map"></div>
+    <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Amber map segments mark where sunlight crosses the vehicle; dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+const DEG = Math.PI / 180;
+
+/* ---------- solar position (validated against suncalc, <1 deg) ---------- */
+function sunPos(date, lat, lng) {
+  const d = date.getTime() / 86400000 - 10957.5;
+  const g = DEG * ((357.529 + 0.98560028 * d) % 360);
+  const q = (280.459 + 0.98564736 * d) % 360;
+  const L = DEG * (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g));
+  const e = DEG * 23.439;
+  const dec = Math.asin(Math.sin(e) * Math.sin(L));
+  let RA = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)) / DEG;
+  RA = (RA + 360) % 360;
+  const GMST = (280.46061837 + 360.98564736629 * d) % 360;
+  let H = ((GMST + lng - RA) % 360 + 360) % 360;
+  if (H > 180) H -= 360;
+  const Hr = H * DEG, la = lat * DEG;
+  const alt = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(Hr));
+  const az = Math.atan2(Math.sin(Hr), Math.cos(Hr) * Math.sin(la) - Math.tan(dec) * Math.cos(la));
+  return { azimuth: (az / DEG + 180) % 360, altitude: alt / DEG };
+}
+
+/* ---------- geometry ---------- */
+function haversine(a, b) {
+  const R = 6371000, dLat = (b[0] - a[0]) * DEG, dLon = (b[1] - a[1]) * DEG;
+  const s = Math.sin(dLat / 2) ** 2 +
+    Math.cos(a[0] * DEG) * Math.cos(b[0] * DEG) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function bearing(a, b) {
+  const y = Math.sin((b[1] - a[1]) * DEG) * Math.cos(b[0] * DEG);
+  const x = Math.cos(a[0] * DEG) * Math.sin(b[0] * DEG) -
+    Math.sin(a[0] * DEG) * Math.cos(b[0] * DEG) * Math.cos((b[1] - a[1]) * DEG);
+  return ((Math.atan2(y, x) / DEG) + 360) % 360;
+}
+
+/* Google encoded polyline, precision-aware (Transitous uses precision 7). */
+function decodePolyline(str, precision) {
+  const factor = Math.pow(10, precision || 5);
+  const pts = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < str.length) {
+    for (const which of [0, 1]) {
+      let shift = 0, result = 0, byte;
+      do {
+        byte = str.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (which === 0) lat += delta; else lng += delta;
+    }
+    pts.push([lat / factor, lng / factor]);
+  }
+  return pts;
+}
+
+/* ---------- exposure model ---------- */
+function intensity(rel, altitude) {
+  if (altitude <= 0) return 0;
+  const lateral = Math.abs(Math.sin(rel * DEG));
+  const height = Math.max(0, Math.cos((Math.min(altitude, 65) / 65) * (Math.PI / 2)));
+  return lateral * height;
+}
+
+function shadeVerdict(polyline, departure, durationMin) {
+  const THRESH = 0.15, EVEN = 0.15;
+  const segs = [];
+  let totalDist = 0;
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const d = haversine(polyline[i], polyline[i + 1]);
+    if (d < 1) continue;
+    segs.push({ a: polyline[i], b: polyline[i + 1], dist: d });
+    totalDist += d;
+  }
+  let elapsed = 0, left = 0, right = 0, leftSun = 0, rightSun = 0;
+  const detail = [];
+  for (const s of segs) {
+    const segMin = durationMin * (s.dist / totalDist);
+    const mid = new Date(departure.getTime() + (elapsed + segMin / 2) * 60000);
+    elapsed += segMin;
+    const hdg = bearing(s.a, s.b);
+    const sun = sunPos(mid, (s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2);
+    let rel = 0, w = 0, sunRight = false;
+    if (sun.altitude > 0) {
+      rel = ((sun.azimuth - hdg) % 360 + 360) % 360;
+      w = intensity(rel, sun.altitude);
+      sunRight = rel > 0 && rel < 180;
+      if (sunRight) { right += segMin * w; if (w > THRESH) rightSun += segMin; }
+      else { left += segMin * w; if (w > THRESH) leftSun += segMin; }
+    }
+    detail.push({ a: s.a, b: s.b, min: segMin, w, sunRight });
+  }
+  const total = left + right;
+  let side;
+  if (!segs.length || total / durationMin < 0.05) side = "either";
+  else if (Math.abs(left - right) / total < EVEN) side = "either";
+  else side = left < right ? "left" : "right";
+  const mySun = side === "right" ? rightSun : side === "left" ? leftSun : Math.min(leftSun, rightSun);
+  return {
+    side,
+    durationMin: Math.round(durationMin),
+    shadedMin: Math.round(durationMin - mySun),
+    mySunMin: Math.round(mySun),
+    detail,
+  };
+}
+
+/* ---------- transit planning (Transitous / MOTIS) ---------- */
+const MODE_NAMES = {
+  BUS: "Bus", TRAM: "Tram", METRO: "Metro", SUBWAY: "Metro", RAIL: "Train",
+  REGIONAL_RAIL: "Train", REGIONAL_FAST_RAIL: "Train", LONG_DISTANCE: "Train",
+  HIGHSPEED_RAIL: "Train", NIGHT_RAIL: "Train", FERRY: "Ferry",
+  COACH: "Coach", CABLE_CAR: "Cable car", FUNICULAR: "Funicular",
+};
+
+async function planTransit(a, b, departLocal) {
+  const url = "https://api.transitous.org/api/v1/plan" +
+    "?fromPlace=" + a[0] + "," + a[1] +
+    "&toPlace=" + b[0] + "," + b[1] +
+    "&time=" + encodeURIComponent(new Date(departLocal).toISOString());
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("plan");
+  const j = await res.json();
+  if (!j.itineraries || !j.itineraries.length) throw new Error("noresult");
+  const it = j.itineraries[0];
+  return {
+    start: new Date(it.startTime),
+    end: new Date(it.endTime),
+    legs: it.legs.map(leg => ({
+      transit: leg.mode !== "WALK",
+      mode: MODE_NAMES[leg.mode] || leg.mode,
+      name: leg.routeShortName || "",
+      headsign: leg.headsign || "",
+      start: new Date(leg.startTime),
+      durationMin: (new Date(leg.endTime) - new Date(leg.startTime)) / 60000,
+      poly: decodePolyline(leg.legGeometry.points, leg.legGeometry.precision),
+    })),
+  };
+}
+
+/* Road route via OSRM — fallback when no transit is found. */
+async function roadRoute(a, b) {
+  const url = "https://router.project-osrm.org/route/v1/driving/" +
+    a[1] + "," + a[0] + ";" + b[1] + "," + b[0] + "?overview=full&geometries=geojson";
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("route");
+  const j = await res.json();
+  if (j.code !== "Ok" || !j.routes.length) throw new Error("route");
+  return {
+    poly: j.routes[0].geometry.coordinates.map(c => [c[1], c[0]]),
+    durationMin: j.routes[0].legs[0].duration / 60,
+  };
+}
+
+/* ---------- weather (Open-Meteo) — an enhancement, never blocks the verdict ---------- */
+async function fetchClouds(lat, lng, start, end) {
+  const day = d => d.toISOString().slice(0, 10);
+  const url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat.toFixed(3) +
+    "&longitude=" + lng.toFixed(3) + "&hourly=cloud_cover&timezone=UTC" +
+    "&start_date=" + day(start) + "&end_date=" + day(end);
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const j = await res.json();
+  return j.hourly || null;
+}
+function cloudAt(hourly, date) {
+  const key = date.toISOString().slice(0, 13) + ":00";
+  const i = hourly.time.indexOf(key);
+  return i >= 0 ? hourly.cloud_cover[i] : null;
+}
+async function attachWeather(trip) {
+  try {
+    const legs = trip.legs.filter(l => l.transit && l.poly.length > 1);
+    if (!legs.length) return;
+    const pts = legs.flatMap(l => [l.poly[0], l.poly[l.poly.length - 1]]);
+    const lat = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const lng = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    const hourly = await fetchClouds(lat, lng, trip.start, trip.end);
+    if (!hourly) return;
+    for (const leg of legs) {
+      const mid = new Date(leg.start.getTime() + leg.durationMin * 30000);
+      leg.cloud = cloudAt(hourly, mid);
+    }
+  } catch (e) { /* forecast unavailable — verdicts still stand on geometry */ }
+}
+
+/* ---------- UI plumbing ---------- */
+const $ = id => document.getElementById(id);
+let map = null, routeLayer = null, fromCoord = null;
+
+function setStatus(msg, isErr) {
+  $("status").textContent = msg || "";
+  $("status").className = "status" + (isErr ? " err" : "");
+}
+function nowLocalISO() {
+  const d = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 16);
+}
+$("depart").value = nowLocalISO();
+
+async function geocode(q) {
+  const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+  const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(q);
+  const res = await fetch(url, { headers: { "Accept": "application/json" } });
+  if (!res.ok) throw new Error("geocode");
+  const j = await res.json();
+  if (!j.length) throw new Error("notfound:" + q);
+  return [parseFloat(j[0].lat), parseFloat(j[0].lon)];
+}
+
+$("locate").addEventListener("click", () => {
+  if (!navigator.geolocation) { setStatus("Location isn't available in this browser.", true); return; }
+  setStatus("Finding you…");
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      fromCoord = [p.coords.latitude, p.coords.longitude];
+      $("from").value = p.coords.latitude.toFixed(4) + ", " + p.coords.longitude.toFixed(4);
+      setStatus("Location set.");
+    },
+    () => setStatus("Couldn't get your location — type a starting point instead.", true)
+  );
+});
+$("from").addEventListener("input", () => { fromCoord = null; });
+
+function vehicleSVG(side) {
+  const shadeFill = "var(--shade-soft)", sunFill = "var(--sun-soft)";
+  const l = side === "left" ? shadeFill : side === "right" ? sunFill : "#e7ecec";
+  const r = side === "right" ? shadeFill : side === "left" ? sunFill : "#e7ecec";
+  const seatL = side === "left" ? "var(--shade)" : "#b9c6c5";
+  const seatR = side === "right" ? "var(--shade)" : "#b9c6c5";
+  let seats = "";
+  for (let y = 40; y <= 96; y += 15) {
+    seats += `<rect x="40" y="${y}" width="13" height="9" rx="2" fill="${seatL}"/>`;
+    seats += `<rect x="79" y="${y}" width="13" height="9" rx="2" fill="${seatR}"/>`;
+  }
+  return `<svg width="132" height="122" viewBox="0 0 132 122" role="img" aria-label="Top-down vehicle, ${side === "either" ? "both sides similar" : side + " side shaded"}">
+    <rect x="32" y="24" width="34" height="88" rx="8" fill="${l}"/>
+    <rect x="66" y="24" width="34" height="88" rx="8" fill="${r}"/>
+    <rect x="32" y="24" width="68" height="88" rx="10" fill="none" stroke="var(--ink)" stroke-width="2.5"/>
+    <path d="M 66 5 L 55 20 L 77 20 Z" fill="var(--ink)"/>
+    ${seats}
+  </svg>`;
+}
+
+function fmtTime(d) {
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function legCard(leg, verdict) {
+  const { side, durationMin, shadedMin, mySunMin, detail } = verdict;
+  const card = document.createElement("div");
+  card.className = "card verdict";
+  const label = leg.name ? `${leg.mode} ${leg.name}` : leg.mode;
+  const head = leg.headsign ? ` toward ${leg.headsign}` : "";
+  const cloud = leg.cloud;
+  const overcast = cloud != null && cloud >= 85;
+  const cloudy = cloud != null && cloud >= 60 && cloud < 85;
+  let word, wordEven, sub;
+  if (overcast) {
+    word = "Any seat"; wordEven = true;
+    sub = `Overcast (~${cloud}% cloud) — the sun won't be a factor on this leg.` +
+      (side !== "either" ? ` If it clears, ${side} is the shady side.` : "");
+  } else if (side === "either") {
+    word = "Either side"; wordEven = true;
+    sub = "Sun exposure is about even on this leg — sit wherever you like.";
+  } else {
+    word = "Sit " + side; wordEven = false;
+    sub = mySunMin === 0
+      ? `Fully shaded for this ${durationMin}-minute leg.`
+      : `Shaded for about ${shadedMin} of ${durationMin} minutes — sun reaches you for ${mySunMin}.`;
+    if (cloudy) sub += ` Mostly cloudy (~${cloud}%), so it may matter less.`;
+  }
+  const cloudChip = cloud != null ? ` · ${cloud}% cloud` : "";
+  card.innerHTML = `
+    <div class="verdict-head">
+      <div class="leg-line">
+        <span class="badge">${label}</span>
+        <span class="leg-meta">${fmtTime(leg.start)}–${fmtTime(new Date(leg.start.getTime() + durationMin * 60000))}${head}${cloudChip}</span>
+      </div>
+      <p class="verdict-word${wordEven ? " even" : ""}">${word}</p>
+    </div>
+    <p class="verdict-sub">${sub}</p>
+    <div class="vehicle">${vehicleSVG(overcast ? "either" : side)}</div>
+    <div class="tl-wrap">
+      <div class="tl" aria-hidden="true"></div>
+      <div class="tl-label"><span>${fmtTime(leg.start)}</span><span>${fmtTime(new Date(leg.start.getTime() + durationMin * 60000))}</span></div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--shade)"></span>Your side shaded</span>
+        <span><span class="dot" style="background:var(--sun)"></span>Sun on your side</span>
+      </div>
+    </div>`;
+  const tl = card.querySelector(".tl");
+  const refSide = side === "right" ? "right" : "left";
+  for (const seg of detail) {
+    const sunny = seg.w > 0.15 && ((seg.sunRight && refSide === "right") || (!seg.sunRight && refSide === "left"));
+    const el = document.createElement("span");
+    el.style.width = (100 * seg.min / durationMin) + "%";
+    el.style.background = sunny ? (overcast ? "var(--sun-soft)" : "var(--sun)") : "var(--shade)";
+    tl.appendChild(el);
+  }
+  return card;
+}
+
+function render(trip) {
+  $("result").style.display = "block";
+  $("result").classList.remove("show");
+  void $("result").offsetWidth;
+  $("result").classList.add("show");
+
+  const transitLegs = trip.legs.filter(l => l.transit);
+  $("trip-title").textContent =
+    transitLegs.length > 1 ? `Your trip · ${transitLegs.length} legs` : "Your trip";
+  $("trip-times").textContent = fmtTime(trip.start) + " → " + fmtTime(trip.end);
+
+  const legsEl = $("legs");
+  legsEl.innerHTML = "";
+  const verdicts = [];
+  for (const leg of trip.legs) {
+    if (!leg.transit || leg.poly.length < 2) continue;
+    const v = shadeVerdict(leg.poly, leg.start, leg.durationMin);
+    verdicts.push({ leg, v });
+    legsEl.appendChild(legCard(leg, v));
+  }
+  if (!verdicts.length) {
+    const note = document.createElement("div");
+    note.className = "card";
+    note.textContent = "This trip is all walking — bring a hat.";
+    legsEl.appendChild(note);
+  }
+
+  if (!map) {
+    map = L.map("map", { zoomControl: false });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors", maxZoom: 19,
+    }).addTo(map);
+  }
+  if (routeLayer) routeLayer.remove();
+  routeLayer = L.layerGroup().addTo(map);
+  const allPts = [];
+  for (const leg of trip.legs) {
+    if (leg.poly.length < 2) continue;
+    allPts.push(...leg.poly);
+    if (!leg.transit) {
+      L.polyline(leg.poly, { color: "#8fa2a4", weight: 4, dashArray: "2 8", opacity: 0.9 }).addTo(routeLayer);
+    }
+  }
+  for (const { v } of verdicts) {
+    for (const seg of v.detail) {
+      L.polyline([seg.a, seg.b], {
+        color: seg.w > 0.15 ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
+      }).addTo(routeLayer);
+    }
+  }
+  if (allPts.length) {
+    L.circleMarker(allPts[0], { radius: 6, color: "#14333a", fillColor: "#fff", fillOpacity: 1 }).addTo(routeLayer);
+    L.circleMarker(allPts[allPts.length - 1], { radius: 6, color: "#14333a", fillColor: "#14333a", fillOpacity: 1 }).addTo(routeLayer);
+    map.fitBounds(L.latLngBounds(allPts), { padding: [24, 24] });
+  }
+  setTimeout(() => map.invalidateSize(), 60);
+}
+
+async function run(e) {
+  e.preventDefault();
+  const toQ = $("to").value.trim(), fromQ = $("from").value.trim();
+  if (!fromQ || !toQ) { setStatus("Fill in both a starting point and a destination.", true); return; }
+  $("go").disabled = true;
+  try {
+    setStatus("Planning your transit route…");
+    const a = fromCoord || await geocode(fromQ);
+    const b = await geocode(toQ);
+    const depart = $("depart").value || new Date().toISOString();
+    let trip;
+    try {
+      trip = await planTransit(a, b, depart);
+      setStatus("");
+    } catch (err) {
+      if (err.message !== "noresult") throw err;
+      setStatus("No transit route found there — showing the road route instead.");
+      const r = await roadRoute(a, b);
+      const start = new Date(depart);
+      trip = {
+        start, end: new Date(start.getTime() + r.durationMin * 60000),
+        legs: [{ transit: true, mode: "Road", name: "", headsign: "",
+                 start, durationMin: r.durationMin, poly: r.poly }],
+      };
+    }
+    await attachWeather(trip);
+    render(trip);
+  } catch (err) {
+    if (String(err.message).startsWith("notfound:"))
+      setStatus(`Couldn't find "${err.message.slice(9)}" — try adding the city name.`, true);
+    else
+      setStatus("Couldn't reach the routing service. If you're viewing this in a sandboxed preview, download the file and open it directly — or try the demo trip.", true);
+  }
+  $("go").disabled = false;
+}
+$("form").addEventListener("submit", run);
+
+/* Demo trip: bundled two-leg journey so the app works with no network. */
+const DEMO_LEG1 = [
+  [52.5219, 13.4132], [52.5227, 13.4024], [52.5222, 13.3941], [52.5215, 13.3868],
+  [52.5208, 13.3789], [52.5201, 13.3695], [52.5182, 13.3625], [52.5163, 13.3585],
+];
+const DEMO_LEG2 = [
+  [52.5163, 13.3585], [52.5138, 13.3548], [52.5113, 13.3505], [52.5090, 13.3450],
+  [52.5074, 13.3391], [52.5064, 13.3324], [52.5057, 13.3260], [52.5055, 13.3220],
+];
+$("demo").addEventListener("click", () => {
+  $("from").value = "Alexanderplatz, Berlin";
+  $("to").value = "Zoologischer Garten, Berlin";
+  const start = new Date($("depart").value || Date.now());
+  const l1End = new Date(start.getTime() + 12 * 60000);
+  const l2Start = new Date(l1End.getTime() + 4 * 60000);
+  render({
+    start, end: new Date(l2Start.getTime() + 11 * 60000),
+    legs: [
+      { transit: true, mode: "Metro", name: "S5", headsign: "Westkreuz",
+        start, durationMin: 12, poly: DEMO_LEG1 },
+      { transit: false, mode: "Walk", name: "", headsign: "",
+        start: l1End, durationMin: 4, poly: [DEMO_LEG1[DEMO_LEG1.length - 1], DEMO_LEG2[0]] },
+      { transit: true, mode: "Bus", name: "M45", headsign: "Zoologischer Garten",
+        start: l2Start, durationMin: 11, poly: DEMO_LEG2 },
+    ],
+  });
+  setStatus("Demo trip: a two-leg journey, no network needed (map tiles may still require internet).");
+});
+
+/* PWA: register the service worker when served over http(s); harmless on file:// */
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

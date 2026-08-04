@@ -1,0 +1,10 @@
+services:
+  shade:
+    image: nginx:alpine
+    container_name: shade
+    restart: unless-stopped
+    ports:
+      - "8601:80"
+    volumes:
+      - ./app:/usr/share/nginx/html:ro
+      - ./shade.conf:/etc/nginx/conf.d/default.conf:ro

@@ -1,0 +1,14 @@
+{
+  "name": "Where is the shade?",
+  "short_name": "Shade",
+  "description": "Pick the cool side of the bus or train before you board.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#edf3f2",
+  "theme_color": "#14333a",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
