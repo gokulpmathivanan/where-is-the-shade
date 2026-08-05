@@ -64,11 +64,6 @@
     font-family: "Archivo Black", sans-serif; font-size: 16px; letter-spacing: 0.3px;
   }
   .btn-go:disabled { opacity: 0.55; cursor: wait; }
-  .btn-demo {
-    width: 100%; margin-top: 8px; height: 40px; font: inherit; font-size: 14px;
-    background: none; border: 1px dashed var(--line); border-radius: 10px;
-    color: var(--muted); cursor: pointer;
-  }
   .status { font-size: 13.5px; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
   .status.err { color: #a33a2a; }
 
@@ -121,7 +116,7 @@
     </div>
     <div>
       <h1>Where is the shade?</h1>
-      <p>Pick the cool side before you board</p>
+      <p>Tells you which side of the bus or train stays out of the sun</p>
     </div>
   </header>
 
@@ -142,7 +137,6 @@
       <input type="datetime-local" id="depart" />
     </div>
     <button class="btn-go" id="go" type="submit">Find the shade</button>
-    <button class="btn-demo" id="demo" type="button">No route handy? Try a demo trip</button>
     <p class="status" id="status" role="status"></p>
   </form>
 
@@ -153,7 +147,7 @@
     </div>
     <div id="legs"></div>
     <div id="map"></div>
-    <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Amber map segments mark where sunlight crosses the vehicle; dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
+    <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Map colors match the timeline: amber where the sun reaches your recommended side, green where it's shaded; dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
   </div>
 </div>
 
@@ -332,17 +326,18 @@ async function roadRoute(a, b) {
 async function fetchClouds(lat, lng, start, end) {
   const day = d => d.toISOString().slice(0, 10);
   const url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat.toFixed(3) +
-    "&longitude=" + lng.toFixed(3) + "&hourly=cloud_cover&timezone=UTC" +
+    "&longitude=" + lng.toFixed(3) +
+    "&hourly=cloud_cover,direct_normal_irradiance&timezone=UTC" +
     "&start_date=" + day(start) + "&end_date=" + day(end);
   const res = await fetch(url);
   if (!res.ok) return null;
   const j = await res.json();
   return j.hourly || null;
 }
-function cloudAt(hourly, date) {
+function hourlyAt(hourly, field, date) {
   const key = date.toISOString().slice(0, 13) + ":00";
   const i = hourly.time.indexOf(key);
-  return i >= 0 ? hourly.cloud_cover[i] : null;
+  return i >= 0 && hourly[field] ? hourly[field][i] : null;
 }
 async function attachWeather(trip) {
   try {
@@ -354,20 +349,25 @@ async function attachWeather(trip) {
     trip.hourly = await fetchClouds(lat, lng, trip.start, trip.end);
   } catch (e) { /* forecast unavailable — verdicts still stand on geometry */ }
 }
-/* Cloud cover averaged over the moments the sun could actually hit you,
-   weighted by exposure — so a night-time leg midpoint can't declare a
-   sunny afternoon "overcast". Returns null when the sun never factors in. */
-function sunWeightedCloud(hourly, detail) {
-  if (!hourly) return null;
-  let num = 0, den = 0;
+/* Forecast averaged over the moments the sun could actually hit you, weighted
+   by exposure. DNI (direct normal irradiance, W/m²) measures the sunbeam
+   itself — the honest "will the sun glare at you" signal. Total cloud %
+   counts thin and scattered layers that often don't block the beam at all,
+   so it's kept only as a fallback and for context. */
+function sunWeather(hourly, detail) {
+  if (!hourly) return { cloud: null, dni: null };
+  let cn = 0, cd = 0, dn = 0, dd = 0;
   for (const seg of detail) {
     if (seg.w <= 0) continue;
-    const cc = cloudAt(hourly, seg.t);
-    if (cc == null) continue;
-    num += seg.w * seg.min * cc;
-    den += seg.w * seg.min;
+    const cc = hourlyAt(hourly, "cloud_cover", seg.t);
+    if (cc != null) { cn += seg.w * seg.min * cc; cd += seg.w * seg.min; }
+    const dni = hourlyAt(hourly, "direct_normal_irradiance", seg.t);
+    if (dni != null) { dn += seg.w * seg.min * dni; dd += seg.w * seg.min; }
   }
-  return den > 0 ? Math.round(num / den) : null;
+  return {
+    cloud: cd > 0 ? Math.round(cn / cd) : null,
+    dni: dd > 0 ? Math.round(dn / dd) : null,
+  };
 }
 
 /* ---------- UI plumbing ---------- */
@@ -439,16 +439,21 @@ function legCard(leg, verdict) {
   card.className = "card verdict";
   const label = leg.name ? `${leg.mode} ${leg.name}` : leg.mode;
   const head = leg.headsign ? ` toward ${leg.headsign}` : "";
-  const cloud = leg.cloud;
-  const overcast = cloud != null && cloud >= 85;
-  const cloudy = cloud != null && cloud >= 60 && cloud < 85;
+  const cloud = leg.cloud, dni = leg.dni;
+  // Tiers from the beam itself when we have it: <120 W/m² ≈ no direct sun,
+  // 120–400 ≈ filtered, >400 ≈ full glare. Cloud % only as fallback.
+  const overcast = dni != null ? dni < 120 : (cloud != null && cloud >= 85);
+  const cloudy = !overcast && (dni != null ? dni < 400 : (cloud != null && cloud >= 60));
+  const chipWord = dni != null
+    ? (overcast ? "little sun" : cloudy ? "filtered sun" : "sunny")
+    : (cloud != null ? cloud + "% cloud" : "");
   const isRoad = leg.mode === "Road";
   const sunnySide = side === "left" ? "right" : "left";
   let word, wordEven, sub;
   if (overcast) {
     word = isRoad ? "Overcast" : "Any seat"; wordEven = true;
-    sub = `Overcast (~${cloud}% cloud) — little direct sun on this ${isRoad ? "drive" : "leg"}.` +
-      (side !== "either" ? ` If it clears, the ${side} side stays shaded.` : "");
+    sub = `Forecast expects little direct sun on this ${isRoad ? "drive" : "leg"}.` +
+      (side !== "either" ? ` If the sun breaks through, the ${side} side stays shaded.` : "");
   } else if (side === "either") {
     word = isRoad ? "Sun is balanced" : "Either side"; wordEven = true;
     sub = isRoad
@@ -459,18 +464,18 @@ function legCard(leg, verdict) {
     sub = mySunMin === 0
       ? `The ${side} side stays shaded for the whole ${durationMin}-minute drive.`
       : `Mostly on the ${sunnySide} — the ${side} side is shaded for about ${shadedMin} of ${durationMin} minutes.`;
-    if (cloudy) sub += ` Mostly cloudy (~${cloud}%), so it may matter less.`;
+    if (cloudy) sub += ` Forecast expects only filtered sun, so it may matter less.`;
   } else {
     word = "Sit " + side; wordEven = false;
     sub = mySunMin === 0
       ? `Fully shaded for this ${durationMin}-minute leg.`
       : `Shaded for about ${shadedMin} of ${durationMin} minutes — sun reaches you for ${mySunMin}.`;
-    if (cloudy) sub += ` Mostly cloudy (~${cloud}%), so it may matter less.`;
+    if (cloudy) sub += ` Forecast expects only filtered sun, so it may matter less.`;
   }
   if (verdict.reversals) {
     sub += ` This ${leg.mode.toLowerCase()} reverses direction en route — the verdict already accounts for your seat flipping sides.`;
   }
-  const cloudChip = cloud != null ? ` · ${cloud}% cloud` : "";
+  const cloudChip = chipWord ? ` · ${chipWord}` : "";
   card.innerHTML = `
     <div class="verdict-head">
       <div class="leg-line">
@@ -520,7 +525,9 @@ function render(trip) {
     if (!leg.transit || leg.poly.length < 2) continue;
     const v = shadeVerdict(leg.poly, leg.start, leg.durationMin,
       { allowReversals: RAIL_LIKE.includes(leg.mode) });
-    leg.cloud = sunWeightedCloud(trip.hourly, v.detail);
+    const wx = sunWeather(trip.hourly, v.detail);
+    leg.cloud = wx.cloud;
+    leg.dni = wx.dni;
     verdicts.push({ leg, v });
     legsEl.appendChild(legCard(leg, v));
   }
@@ -548,9 +555,12 @@ function render(trip) {
     }
   }
   for (const { v } of verdicts) {
+    const refSide = v.side === "right" ? "right" : "left";
     for (const seg of v.detail) {
+      const sunny = seg.w > 0.15 &&
+        ((seg.sunRight && refSide === "right") || (!seg.sunRight && refSide === "left"));
       L.polyline([seg.a, seg.b], {
-        color: seg.w > 0.15 ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
+        color: sunny ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
       }).addTo(routeLayer);
     }
   }
@@ -593,40 +603,11 @@ async function run(e) {
     if (String(err.message).startsWith("notfound:"))
       setStatus(`Couldn't find "${err.message.slice(9)}" — try adding the city name.`, true);
     else
-      setStatus("Couldn't reach the routing service. If you're viewing this in a sandboxed preview, download the file and open it directly — or try the demo trip.", true);
+      setStatus("Couldn't reach the routing service — check your connection and try again in a moment.", true);
   }
   $("go").disabled = false;
 }
 $("form").addEventListener("submit", run);
-
-/* Demo trip: bundled two-leg journey so the app works with no network. */
-const DEMO_LEG1 = [
-  [52.5219, 13.4132], [52.5227, 13.4024], [52.5222, 13.3941], [52.5215, 13.3868],
-  [52.5208, 13.3789], [52.5201, 13.3695], [52.5182, 13.3625], [52.5163, 13.3585],
-];
-const DEMO_LEG2 = [
-  [52.5163, 13.3585], [52.5138, 13.3548], [52.5113, 13.3505], [52.5090, 13.3450],
-  [52.5074, 13.3391], [52.5064, 13.3324], [52.5057, 13.3260], [52.5055, 13.3220],
-];
-$("demo").addEventListener("click", () => {
-  $("from").value = "Alexanderplatz, Berlin";
-  $("to").value = "Zoologischer Garten, Berlin";
-  const start = new Date($("depart").value || Date.now());
-  const l1End = new Date(start.getTime() + 12 * 60000);
-  const l2Start = new Date(l1End.getTime() + 4 * 60000);
-  render({
-    start, end: new Date(l2Start.getTime() + 11 * 60000),
-    legs: [
-      { transit: true, mode: "Metro", name: "S5", headsign: "Westkreuz",
-        start, durationMin: 12, poly: DEMO_LEG1 },
-      { transit: false, mode: "Walk", name: "", headsign: "",
-        start: l1End, durationMin: 4, poly: [DEMO_LEG1[DEMO_LEG1.length - 1], DEMO_LEG2[0]] },
-      { transit: true, mode: "Bus", name: "M45", headsign: "Zoologischer Garten",
-        start: l2Start, durationMin: 11, poly: DEMO_LEG2 },
-    ],
-  });
-  setStatus("Demo trip: a two-leg journey, no network needed (map tiles may still require internet).");
-});
 
 /* PWA: register the service worker when served over http(s); harmless on file:// */
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
