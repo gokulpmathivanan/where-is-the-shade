@@ -224,7 +224,8 @@ function intensity(rel, altitude) {
   return lateral * height;
 }
 
-function shadeVerdict(polyline, departure, durationMin) {
+function shadeVerdict(polyline, departure, durationMin, opts) {
+  const { allowReversals = false } = opts || {};
   const THRESH = 0.15, EVEN = 0.15;
   const segs = [];
   let totalDist = 0;
@@ -235,22 +236,34 @@ function shadeVerdict(polyline, departure, durationMin) {
     totalDist += d;
   }
   let elapsed = 0, left = 0, right = 0, leftSun = 0, rightSun = 0;
+  // Terminus reversals (rail only): a near-180° bearing jump means the train
+  // backs out — the vehicle does NOT turn, so your seat flips sides relative
+  // to travel. Buses do hairpin *turns* instead, where seat sides are
+  // preserved, hence the mode gate. Short segments are ignored as noise.
+  let flip = false, prevBearing = null, reversals = 0;
   const detail = [];
   for (const s of segs) {
     const segMin = durationMin * (s.dist / totalDist);
     const mid = new Date(departure.getTime() + (elapsed + segMin / 2) * 60000);
     elapsed += segMin;
     const hdg = bearing(s.a, s.b);
+    if (allowReversals && prevBearing != null && s.dist >= 50) {
+      let dB = Math.abs(hdg - prevBearing);
+      if (dB > 180) dB = 360 - dB;
+      if (dB > 150) { flip = !flip; reversals++; }
+    }
+    if (s.dist >= 50) prevBearing = hdg;
     const sun = sunPos(mid, (s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2);
-    let rel = 0, w = 0, sunRight = false;
+    let w = 0, sunRight = false;
     if (sun.altitude > 0) {
-      rel = ((sun.azimuth - hdg) % 360 + 360) % 360;
+      const rel = ((sun.azimuth - hdg) % 360 + 360) % 360;
       w = intensity(rel, sun.altitude);
-      sunRight = rel > 0 && rel < 180;
+      const travelRight = rel > 0 && rel < 180;
+      sunRight = flip ? !travelRight : travelRight; // physical seat side, as boarded
       if (sunRight) { right += segMin * w; if (w > THRESH) rightSun += segMin; }
       else { left += segMin * w; if (w > THRESH) leftSun += segMin; }
     }
-    detail.push({ a: s.a, b: s.b, min: segMin, w, sunRight });
+    detail.push({ a: s.a, b: s.b, t: mid, min: segMin, w, sunRight });
   }
   const total = left + right;
   let side;
@@ -263,6 +276,7 @@ function shadeVerdict(polyline, departure, durationMin) {
     durationMin: Math.round(durationMin),
     shadedMin: Math.round(durationMin - mySun),
     mySunMin: Math.round(mySun),
+    reversals,
     detail,
   };
 }
@@ -337,13 +351,23 @@ async function attachWeather(trip) {
     const pts = legs.flatMap(l => [l.poly[0], l.poly[l.poly.length - 1]]);
     const lat = pts.reduce((s, p) => s + p[0], 0) / pts.length;
     const lng = pts.reduce((s, p) => s + p[1], 0) / pts.length;
-    const hourly = await fetchClouds(lat, lng, trip.start, trip.end);
-    if (!hourly) return;
-    for (const leg of legs) {
-      const mid = new Date(leg.start.getTime() + leg.durationMin * 30000);
-      leg.cloud = cloudAt(hourly, mid);
-    }
+    trip.hourly = await fetchClouds(lat, lng, trip.start, trip.end);
   } catch (e) { /* forecast unavailable — verdicts still stand on geometry */ }
+}
+/* Cloud cover averaged over the moments the sun could actually hit you,
+   weighted by exposure — so a night-time leg midpoint can't declare a
+   sunny afternoon "overcast". Returns null when the sun never factors in. */
+function sunWeightedCloud(hourly, detail) {
+  if (!hourly) return null;
+  let num = 0, den = 0;
+  for (const seg of detail) {
+    if (seg.w <= 0) continue;
+    const cc = cloudAt(hourly, seg.t);
+    if (cc == null) continue;
+    num += seg.w * seg.min * cc;
+    den += seg.w * seg.min;
+  }
+  return den > 0 ? Math.round(num / den) : null;
 }
 
 /* ---------- UI plumbing ---------- */
@@ -418,20 +442,33 @@ function legCard(leg, verdict) {
   const cloud = leg.cloud;
   const overcast = cloud != null && cloud >= 85;
   const cloudy = cloud != null && cloud >= 60 && cloud < 85;
+  const isRoad = leg.mode === "Road";
+  const sunnySide = side === "left" ? "right" : "left";
   let word, wordEven, sub;
   if (overcast) {
-    word = "Any seat"; wordEven = true;
-    sub = `Overcast (~${cloud}% cloud) — the sun won't be a factor on this leg.` +
-      (side !== "either" ? ` If it clears, ${side} is the shady side.` : "");
+    word = isRoad ? "Overcast" : "Any seat"; wordEven = true;
+    sub = `Overcast (~${cloud}% cloud) — little direct sun on this ${isRoad ? "drive" : "leg"}.` +
+      (side !== "either" ? ` If it clears, the ${side} side stays shaded.` : "");
   } else if (side === "either") {
-    word = "Either side"; wordEven = true;
-    sub = "Sun exposure is about even on this leg — sit wherever you like.";
+    word = isRoad ? "Sun is balanced" : "Either side"; wordEven = true;
+    sub = isRoad
+      ? "Sunlight lands about evenly on both sides over this drive."
+      : "Sun exposure is about even on this leg — sit wherever you like.";
+  } else if (isRoad) {
+    word = "Sun on the " + sunnySide; wordEven = true;
+    sub = mySunMin === 0
+      ? `The ${side} side stays shaded for the whole ${durationMin}-minute drive.`
+      : `Mostly on the ${sunnySide} — the ${side} side is shaded for about ${shadedMin} of ${durationMin} minutes.`;
+    if (cloudy) sub += ` Mostly cloudy (~${cloud}%), so it may matter less.`;
   } else {
     word = "Sit " + side; wordEven = false;
     sub = mySunMin === 0
       ? `Fully shaded for this ${durationMin}-minute leg.`
       : `Shaded for about ${shadedMin} of ${durationMin} minutes — sun reaches you for ${mySunMin}.`;
     if (cloudy) sub += ` Mostly cloudy (~${cloud}%), so it may matter less.`;
+  }
+  if (verdict.reversals) {
+    sub += ` This ${leg.mode.toLowerCase()} reverses direction en route — the verdict already accounts for your seat flipping sides.`;
   }
   const cloudChip = cloud != null ? ` · ${cloud}% cloud` : "";
   card.innerHTML = `
@@ -477,10 +514,13 @@ function render(trip) {
 
   const legsEl = $("legs");
   legsEl.innerHTML = "";
+  const RAIL_LIKE = ["Train", "Metro", "Tram", "Funicular", "Cable car"];
   const verdicts = [];
   for (const leg of trip.legs) {
     if (!leg.transit || leg.poly.length < 2) continue;
-    const v = shadeVerdict(leg.poly, leg.start, leg.durationMin);
+    const v = shadeVerdict(leg.poly, leg.start, leg.durationMin,
+      { allowReversals: RAIL_LIKE.includes(leg.mode) });
+    leg.cloud = sunWeightedCloud(trip.hourly, v.detail);
     verdicts.push({ leg, v });
     legsEl.appendChild(legCard(leg, v));
   }
