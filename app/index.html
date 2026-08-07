@@ -134,7 +134,10 @@
     </div>
     <div class="field">
       <label for="depart">Departing</label>
-      <input type="datetime-local" id="depart" />
+      <div class="row">
+        <input type="datetime-local" id="depart" autocomplete="off" />
+        <button type="button" class="btn-locate" id="now">Now</button>
+      </div>
     </div>
     <button class="btn-go" id="go" type="submit">Find the shade</button>
     <p class="status" id="status" role="status"></p>
@@ -414,7 +417,19 @@ function nowLocalISO() {
   const d = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
   return d.toISOString().slice(0, 16);
 }
-$("depart").value = nowLocalISO();
+/* Departure time: keep it honest. PWAs restored from the back-forward cache
+   or a background tab keep old form state, so a time from hours ago can
+   linger. Refresh to now on restore/visibility — unless the user set a
+   custom time deliberately, which the Now button can always reset. */
+let departDirty = false;
+function setDepartNow() { $("depart").value = nowLocalISO(); departDirty = false; }
+setDepartNow();
+$("depart").addEventListener("input", () => { departDirty = true; });
+$("now").addEventListener("click", setDepartNow);
+window.addEventListener("pageshow", () => { if (!departDirty) setDepartNow(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !departDirty) setDepartNow();
+});
 
 async function geocode(q) {
   const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
