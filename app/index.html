@@ -147,7 +147,7 @@
     </div>
     <div id="legs"></div>
     <div id="map"></div>
-    <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Map colors match the timeline: amber where the sun reaches your recommended side, green where it's shaded; dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
+    <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Map colors match the timeline: amber where the sun reaches your recommended side, green where it's shaded; solid grey is underground, dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
   </div>
 </div>
 
@@ -219,17 +219,42 @@ function intensity(rel, altitude) {
 }
 
 function shadeVerdict(polyline, departure, durationMin, opts) {
-  const { allowReversals = false } = opts || {};
+  const { allowReversals = false, stops = null } = opts || {};
   const THRESH = 0.15, EVEN = 0.15;
   const segs = [];
   let totalDist = 0;
   for (let i = 0; i < polyline.length - 1; i++) {
     const d = haversine(polyline[i], polyline[i + 1]);
     if (d < 1) continue;
-    segs.push({ a: polyline[i], b: polyline[i + 1], dist: d });
+    segs.push({ a: polyline[i], b: polyline[i + 1], dist: d, pi: i });
     totalDist += d;
   }
-  let elapsed = 0, left = 0, right = 0, leftSun = 0, rightSun = 0;
+  // Tunnel detection from platform levels: a span between two below-ground
+  // stops gets zero sun; a span with one below-ground end (tunnel portals,
+  // or mislabeled stations like "Hauptbahnhof tief" at level 0) gets half.
+  let ugWeight = null;
+  if (stops && stops.length > 1 && stops.some(s => s.level != null && s.level < 0)) {
+    const idx = stops.map(st => {
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < polyline.length; i++) {
+        const d = haversine([st.lat, st.lon], polyline[i]);
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    });
+    ugWeight = new Array(polyline.length).fill(1);
+    for (let k = 0; k < stops.length - 1; k++) {
+      const a = stops[k].level, b = stops[k + 1].level;
+      if (a == null || b == null) continue;
+      const below = (a < 0 ? 1 : 0) + (b < 0 ? 1 : 0);
+      if (!below) continue;
+      const mult = below === 2 ? 0 : 0.5;
+      for (let i = Math.min(idx[k], idx[k + 1]); i < Math.max(idx[k], idx[k + 1]); i++) {
+        ugWeight[i] = Math.min(ugWeight[i], mult);
+      }
+    }
+  }
+  let elapsed = 0, left = 0, right = 0, leftSun = 0, rightSun = 0, ugMin = 0;
   // Terminus reversals (rail only): a near-180° bearing jump means the train
   // backs out — the vehicle does NOT turn, so your seat flips sides relative
   // to travel. Buses do hairpin *turns* instead, where seat sides are
@@ -247,17 +272,19 @@ function shadeVerdict(polyline, departure, durationMin, opts) {
       if (dB > 150) { flip = !flip; reversals++; }
     }
     if (s.dist >= 50) prevBearing = hdg;
+    const uw = ugWeight ? ugWeight[s.pi] : 1;
+    ugMin += segMin * (1 - uw);
     const sun = sunPos(mid, (s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2);
     let w = 0, sunRight = false;
     if (sun.altitude > 0) {
       const rel = ((sun.azimuth - hdg) % 360 + 360) % 360;
-      w = intensity(rel, sun.altitude);
+      w = intensity(rel, sun.altitude) * uw;
       const travelRight = rel > 0 && rel < 180;
       sunRight = flip ? !travelRight : travelRight; // physical seat side, as boarded
       if (sunRight) { right += segMin * w; if (w > THRESH) rightSun += segMin; }
       else { left += segMin * w; if (w > THRESH) leftSun += segMin; }
     }
-    detail.push({ a: s.a, b: s.b, t: mid, min: segMin, w, sunRight });
+    detail.push({ a: s.a, b: s.b, t: mid, min: segMin, w, sunRight, ug: uw === 0 });
   }
   const total = left + right;
   let side;
@@ -270,6 +297,7 @@ function shadeVerdict(polyline, departure, durationMin, opts) {
     durationMin: Math.round(durationMin),
     shadedMin: Math.round(durationMin - mySun),
     mySunMin: Math.round(mySun),
+    ugMin: Math.round(ugMin),
     reversals,
     detail,
   };
@@ -304,6 +332,10 @@ async function planTransit(a, b, departLocal) {
       start: new Date(leg.startTime),
       durationMin: (new Date(leg.endTime) - new Date(leg.startTime)) / 60000,
       poly: decodePolyline(leg.legGeometry.points, leg.legGeometry.precision),
+      stops: [leg.from, ...(leg.intermediateStops || []), leg.to]
+        .filter(s => s && typeof s.lat === "number")
+        .map(s => ({ lat: s.lat, lon: s.lon,
+                     level: typeof s.level === "number" ? s.level : null })),
     })),
   };
 }
@@ -437,7 +469,11 @@ function legCard(leg, verdict) {
   const { side, durationMin, shadedMin, mySunMin, detail } = verdict;
   const card = document.createElement("div");
   card.className = "card verdict";
-  const label = leg.name ? `${leg.mode} ${leg.name}` : leg.mode;
+  // Transitous files German S-Bahnen under METRO; the line name tells the truth.
+  let modeLabel = leg.mode;
+  if (leg.mode === "Metro" && /^S\d/i.test(leg.name)) modeLabel = "S-Bahn";
+  else if (leg.mode === "Metro" && /^U\d/i.test(leg.name)) modeLabel = "U-Bahn";
+  const label = leg.name ? `${modeLabel} ${leg.name}` : modeLabel;
   const head = leg.headsign ? ` toward ${leg.headsign}` : "";
   const cloud = leg.cloud, dni = leg.dni;
   // Tiers from the beam itself when we have it: <120 W/m² ≈ no direct sun,
@@ -449,8 +485,12 @@ function legCard(leg, verdict) {
     : (cloud != null ? cloud + "% cloud" : "");
   const isRoad = leg.mode === "Road";
   const sunnySide = side === "left" ? "right" : "left";
+  const underground = verdict.ugMin >= verdict.durationMin * 0.75;
   let word, wordEven, sub;
-  if (overcast) {
+  if (underground) {
+    word = "Any seat"; wordEven = true;
+    sub = "This leg runs underground — the sun can't reach you down there.";
+  } else if (overcast) {
     word = isRoad ? "Overcast" : "Any seat"; wordEven = true;
     sub = `Forecast expects little direct sun on this ${isRoad ? "drive" : "leg"}.` +
       (side !== "either" ? ` If the sun breaks through, the ${side} side stays shaded.` : "");
@@ -472,10 +512,13 @@ function legCard(leg, verdict) {
       : `Shaded for about ${shadedMin} of ${durationMin} minutes — sun reaches you for ${mySunMin}.`;
     if (cloudy) sub += ` Forecast expects only filtered sun, so it may matter less.`;
   }
-  if (verdict.reversals) {
-    sub += ` This ${leg.mode.toLowerCase()} reverses direction en route — the verdict already accounts for your seat flipping sides.`;
+  if (!underground && verdict.ugMin > 0) {
+    sub += ` About ${verdict.ugMin} of these minutes run underground, where the sun can't reach you.`;
   }
-  const cloudChip = chipWord ? ` · ${chipWord}` : "";
+  if (verdict.reversals) {
+    sub += ` This ${modeLabel === "S-Bahn" || modeLabel === "U-Bahn" ? modeLabel : modeLabel.toLowerCase()} reverses direction en route — the verdict already accounts for your seat flipping sides.`;
+  }
+  const cloudChip = underground ? " · underground" : (chipWord ? ` · ${chipWord}` : "");
   card.innerHTML = `
     <div class="verdict-head">
       <div class="leg-line">
@@ -485,7 +528,7 @@ function legCard(leg, verdict) {
       <p class="verdict-word${wordEven ? " even" : ""}">${word}</p>
     </div>
     <p class="verdict-sub">${sub}</p>
-    <div class="vehicle">${vehicleSVG(overcast ? "either" : side)}</div>
+    <div class="vehicle">${vehicleSVG(underground || overcast ? "either" : side)}</div>
     <div class="tl-wrap">
       <div class="tl" aria-hidden="true"></div>
       <div class="tl-label"><span>${fmtTime(leg.start)}</span><span>${fmtTime(new Date(leg.start.getTime() + durationMin * 60000))}</span></div>
@@ -524,7 +567,7 @@ function render(trip) {
   for (const leg of trip.legs) {
     if (!leg.transit || leg.poly.length < 2) continue;
     const v = shadeVerdict(leg.poly, leg.start, leg.durationMin,
-      { allowReversals: RAIL_LIKE.includes(leg.mode) });
+      { allowReversals: RAIL_LIKE.includes(leg.mode), stops: leg.stops });
     const wx = sunWeather(trip.hourly, v.detail);
     leg.cloud = wx.cloud;
     leg.dni = wx.dni;
@@ -560,7 +603,7 @@ function render(trip) {
       const sunny = seg.w > 0.15 &&
         ((seg.sunRight && refSide === "right") || (!seg.sunRight && refSide === "left"));
       L.polyline([seg.a, seg.b], {
-        color: sunny ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
+        color: seg.ug ? "#8fa2a4" : sunny ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
       }).addTo(routeLayer);
     }
   }
