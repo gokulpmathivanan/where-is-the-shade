@@ -124,13 +124,15 @@
     <div class="field">
       <label for="from">From</label>
       <div class="row">
-        <input type="text" id="from" placeholder="Current stop or address" autocomplete="off" />
+        <input type="text" id="from" placeholder="Current stop or address" autocomplete="off" list="from-suggest" />
         <button type="button" class="btn-locate" id="locate" aria-label="Use my location">◎ Locate</button>
       </div>
+      <datalist id="from-suggest"></datalist>
     </div>
     <div class="field">
       <label for="to">To</label>
-      <input type="text" id="to" placeholder="Where are you headed?" autocomplete="off" />
+      <input type="text" id="to" placeholder="Where are you headed?" autocomplete="off" list="to-suggest" />
+      <datalist id="to-suggest"></datalist>
     </div>
     <div class="field">
       <label for="depart">Departing</label>
@@ -431,7 +433,47 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !departDirty) setDepartNow();
 });
 
+/* ---------- autocomplete (Transitous geocode — built for search-as-you-type;
+   Nominatim's policy forbids it, so Nominatim stays one-shot fallback only) */
+const suggestCoords = new Map(); // display label -> [lat, lon]
+function attachSuggest(inputId, listId) {
+  const input = $(inputId), list = $(listId);
+  let timer = null, ctrl = null;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 3 || suggestCoords.has(q)) return;
+    timer = setTimeout(async () => {
+      try {
+        if (ctrl) ctrl.abort();
+        ctrl = new AbortController();
+        const res = await fetch(
+          "https://api.transitous.org/api/v1/geocode?text=" + encodeURIComponent(q),
+          { signal: ctrl.signal });
+        if (!res.ok) return;
+        const results = await res.json();
+        list.innerHTML = "";
+        const seen = new Set();
+        for (const r of results.slice(0, 8)) {
+          if (typeof r.lat !== "number") continue;
+          const area = (r.areas || []).find(a => a.matched || a.default);
+          const label = r.name + (area && area.name !== r.name ? ", " + area.name : "");
+          if (seen.has(label)) continue;
+          seen.add(label);
+          suggestCoords.set(label, [r.lat, r.lon]);
+          const opt = document.createElement("option");
+          opt.value = label;
+          list.appendChild(opt);
+        }
+      } catch (e) { /* aborted or offline — suggestions are optional */ }
+    }, 300);
+  });
+}
+attachSuggest("from", "from-suggest");
+attachSuggest("to", "to-suggest");
+
 async function geocode(q) {
+  if (suggestCoords.has(q)) return suggestCoords.get(q);
   const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
   if (m) return [parseFloat(m[1]), parseFloat(m[2])];
   const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(q);
