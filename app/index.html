@@ -194,6 +194,18 @@ function bearing(a, b) {
   return ((Math.atan2(y, x) / DEG) + 360) % 360;
 }
 
+/* Travel bearing sustained over ~minDist meters of path before (dir −1) or
+   after (dir +1) vertex j — smooths out zigzags in noisy shape data. */
+function sustainedBearing(poly, j, dir, minDist) {
+  let i = j, acc = 0;
+  while (i + dir >= 0 && i + dir < poly.length && acc < minDist) {
+    i += dir;
+    acc += haversine(poly[i - dir], poly[i]);
+  }
+  if (acc < minDist * 0.4) return null;
+  return dir > 0 ? bearing(poly[j], poly[i]) : bearing(poly[i], poly[j]);
+}
+
 /* Google encoded polyline, precision-aware (Transitous uses precision 7). */
 function decodePolyline(str, precision) {
   const factor = Math.pow(10, precision || 5);
@@ -234,12 +246,10 @@ function shadeVerdict(polyline, departure, durationMin, opts) {
     segs.push({ a: polyline[i], b: polyline[i + 1], dist: d, pi: i });
     totalDist += d;
   }
-  // Tunnel detection from platform levels: a span between two below-ground
-  // stops gets zero sun; a span with one below-ground end (tunnel portals,
-  // or mislabeled stations like "Hauptbahnhof tief" at level 0) gets half.
-  let ugWeight = null;
-  if (stops && stops.length > 1 && stops.some(s => s.level != null && s.level < 0)) {
-    const idx = stops.map(st => {
+  // Nearest polyline vertex for each stop — shared by tunnel and reversal detection.
+  let stopIdx = null;
+  if (stops && stops.length > 1) {
+    stopIdx = stops.map(st => {
       let best = 0, bd = Infinity;
       for (let i = 0; i < polyline.length; i++) {
         const d = haversine([st.lat, st.lon], polyline[i]);
@@ -247,6 +257,12 @@ function shadeVerdict(polyline, departure, durationMin, opts) {
       }
       return best;
     });
+  }
+  // Tunnel detection from platform levels: a span between two below-ground
+  // stops gets zero sun; a span with one below-ground end (tunnel portals,
+  // or mislabeled stations like "Hauptbahnhof tief" at level 0) gets half.
+  let ugWeight = null;
+  if (stopIdx && stops.some(s => s.level != null && s.level < 0)) {
     ugWeight = new Array(polyline.length).fill(1);
     for (let k = 0; k < stops.length - 1; k++) {
       const a = stops[k].level, b = stops[k + 1].level;
@@ -254,29 +270,41 @@ function shadeVerdict(polyline, departure, durationMin, opts) {
       const below = (a < 0 ? 1 : 0) + (b < 0 ? 1 : 0);
       if (!below) continue;
       const mult = below === 2 ? 0 : 0.5;
-      for (let i = Math.min(idx[k], idx[k + 1]); i < Math.max(idx[k], idx[k + 1]); i++) {
+      for (let i = Math.min(stopIdx[k], stopIdx[k + 1]); i < Math.max(stopIdx[k], stopIdx[k + 1]); i++) {
         ugWeight[i] = Math.min(ugWeight[i], mult);
       }
     }
   }
+  // Terminus reversals (rail only): trains reverse at stations, never mid-line,
+  // and station-throat trackwork often zigzags in the shape data. So check
+  // only at intermediate stops, comparing the sustained travel direction
+  // ~250 m before vs after — a real reversal holds the opposite heading for
+  // kilometers, a data zigzag for a few dozen meters.
+  const reversalIdx = [];
+  if (allowReversals && stopIdx) {
+    for (let k = 1; k < stops.length - 1; k++) {
+      const j = stopIdx[k];
+      const before = sustainedBearing(polyline, j, -1, 250);
+      const after = sustainedBearing(polyline, j, +1, 250);
+      if (before == null || after == null) continue;
+      let dB = Math.abs(after - before);
+      if (dB > 180) dB = 360 - dB;
+      if (dB > 150) reversalIdx.push(j);
+    }
+    reversalIdx.sort((a, b) => a - b);
+  }
   let elapsed = 0, left = 0, right = 0, leftSun = 0, rightSun = 0, ugMin = 0;
-  // Terminus reversals (rail only): a near-180° bearing jump means the train
-  // backs out — the vehicle does NOT turn, so your seat flips sides relative
-  // to travel. Buses do hairpin *turns* instead, where seat sides are
-  // preserved, hence the mode gate. Short segments are ignored as noise.
-  let flip = false, prevBearing = null, reversals = 0;
+  // Seat-side parity flips when the path crosses a detected station reversal.
+  let flip = false, reversals = 0, nextRev = 0;
   const detail = [];
   for (const s of segs) {
     const segMin = durationMin * (s.dist / totalDist);
     const mid = new Date(departure.getTime() + (elapsed + segMin / 2) * 60000);
     elapsed += segMin;
     const hdg = bearing(s.a, s.b);
-    if (allowReversals && prevBearing != null && s.dist >= 50) {
-      let dB = Math.abs(hdg - prevBearing);
-      if (dB > 180) dB = 360 - dB;
-      if (dB > 150) { flip = !flip; reversals++; }
+    while (nextRev < reversalIdx.length && s.pi >= reversalIdx[nextRev]) {
+      flip = !flip; reversals++; nextRev++;
     }
-    if (s.dist >= 50) prevBearing = hdg;
     const uw = ugWeight ? ugWeight[s.pi] : 1;
     ugMin += segMin * (1 - uw);
     const sun = sunPos(mid, (s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2);
