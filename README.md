@@ -8,6 +8,8 @@ Installable PWA. No API keys anywhere.
 - Geocoding: OpenStreetMap Nominatim; road fallback: OSRM
 - Sun position: built-in solar calculation (validated against suncalc, <1°)
 
+Access the app here: https://shade.goku-lab.com/
+
 ## Layout
 
 - `app/` — the entire application (static files, no build step)
