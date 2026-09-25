@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#14333a" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500&family=Archivo+Black&display=swap" rel="stylesheet" />
 <style>
@@ -64,6 +64,16 @@
     font-family: "Archivo Black", sans-serif; font-size: 16px; letter-spacing: 0.3px;
   }
   .btn-go:disabled { opacity: 0.55; cursor: wait; }
+  .modes { display: flex; gap: 8px; margin-bottom: 12px; }
+  .mode { flex: 1; position: relative; }
+  .mode input { position: absolute; opacity: 0; pointer-events: none; }
+  .mode span {
+    display: block; text-align: center; padding: 10px 0; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    color: var(--ink); cursor: pointer;
+  }
+  .mode input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .mode input:focus-visible + span { outline: 2px solid var(--shade); outline-offset: 1px; }
   .status { font-size: 13.5px; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
   .status.err { color: #a33a2a; }
 
@@ -71,6 +81,15 @@
                margin: 4px 2px 10px; }
   .trip-head h2 { font-family: "Archivo Black", sans-serif; font-size: 15px; }
   .trip-head span { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .alts { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 12px; scrollbar-width: none; }
+  .alt {
+    flex: none; font: inherit; font-size: 13px; padding: 8px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    color: var(--ink); cursor: pointer; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .alt.active { border-color: var(--ink); background: var(--ink); color: #fff; }
 
   /* Per-leg verdict — the signature block */
   #result { display: none; }
@@ -141,6 +160,11 @@
         <button type="button" class="btn-locate" id="now">Now</button>
       </div>
     </div>
+    <div class="modes" role="radiogroup" aria-label="Travel mode">
+      <label class="mode"><input type="radio" name="mode" value="train" checked /><span>Train</span></label>
+      <label class="mode"><input type="radio" name="mode" value="bus" /><span>Bus</span></label>
+      <label class="mode"><input type="radio" name="mode" value="car" /><span>Car</span></label>
+    </div>
     <button class="btn-go" id="go" type="submit">Find the shade</button>
     <p class="status" id="status" role="status"></p>
   </form>
@@ -150,13 +174,14 @@
       <h2 id="trip-title">Your trip</h2>
       <span id="trip-times"></span>
     </div>
+    <div class="alts" id="alts"></div>
     <div id="legs"></div>
     <div id="map"></div>
     <p class="foot">Transit routing by <a href="https://transitous.org">Transitous</a> (community GTFS data — schedules are real, coverage varies by region). Map colors match the timeline: amber where the sun reaches your recommended side, green where it's shaded; solid grey is underground, dashed grey is walking. Cloud forecast by <a href="https://open-meteo.com/">Open-Meteo</a>; geocoding by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.</p>
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
 <script>
 "use strict";
 const DEG = Math.PI / 180;
@@ -344,17 +369,19 @@ const MODE_NAMES = {
   COACH: "Coach", CABLE_CAR: "Cable car", FUNICULAR: "Funicular",
 };
 
-async function planTransit(a, b, departLocal) {
+async function planTransit(a, b, departLocal, modes) {
   const url = "https://api.transitous.org/api/v1/plan" +
     "?fromPlace=" + a[0] + "," + a[1] +
     "&toPlace=" + b[0] + "," + b[1] +
-    "&time=" + encodeURIComponent(new Date(departLocal).toISOString());
+    "&time=" + encodeURIComponent(new Date(departLocal).toISOString()) +
+    (modes ? "&transitModes=" + encodeURIComponent(modes) : "");
   const res = await fetch(url);
   if (!res.ok) throw new Error("plan");
   const j = await res.json();
   if (!j.itineraries || !j.itineraries.length) throw new Error("noresult");
-  const it = j.itineraries[0];
-  return {
+  // Return every itinerary the router offers — which one the rider actually
+  // takes is their choice, and the verdict depends entirely on it.
+  return j.itineraries.map(it => ({
     start: new Date(it.startTime),
     end: new Date(it.endTime),
     legs: it.legs.map(leg => ({
@@ -370,7 +397,7 @@ async function planTransit(a, b, departLocal) {
         .map(s => ({ lat: s.lat, lon: s.lon,
                      level: typeof s.level === "number" ? s.level : null })),
     })),
-  };
+  }));
 }
 
 /* Road route via OSRM — fallback when no transit is found. */
@@ -437,7 +464,7 @@ function sunWeather(hourly, detail) {
 
 /* ---------- UI plumbing ---------- */
 const $ = id => document.getElementById(id);
-let map = null, routeLayer = null, fromCoord = null;
+let map = null, routeMarkers = [], fromCoord = null;
 
 function setStatus(msg, isErr) {
   $("status").textContent = msg || "";
@@ -667,66 +694,119 @@ function render(trip) {
   }
 
   if (!map) {
-    map = L.map("map", { zoomControl: false });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors", maxZoom: 19,
-    }).addTo(map);
+    // Vector map via MapLibre GL + OpenFreeMap (free, keyless, no limits;
+    // data © OpenStreetMap — attribution rendered by the map itself).
+    // Vector tiles stay crisp at any zoom and zoom continuously.
+    map = new maplibregl.Map({
+      container: "map",
+      style: "https://tiles.openfreemap.org/styles/positron",
+      attributionControl: { compact: true },
+    });
+    map.touchZoomRotate.disableRotation();
   }
-  if (routeLayer) routeLayer.remove();
-  routeLayer = L.layerGroup().addTo(map);
+  // Build the route as color runs: consecutive segments of one color merge
+  // into single lines (walk dashed grey, tunnels solid grey, sun amber,
+  // shade green), drawn via two GeoJSON layers (dash is per-layer in GL).
+  const features = [];
+  const pushRun = (coords, color, kind) => {
+    if (coords && coords.length > 1)
+      features.push({ type: "Feature", properties: { color, kind },
+                      geometry: { type: "LineString", coordinates: coords } });
+  };
   const allPts = [];
   for (const leg of trip.legs) {
     if (leg.poly.length < 2) continue;
     allPts.push(...leg.poly);
-    if (!leg.transit) {
-      L.polyline(leg.poly, { color: "#8fa2a4", weight: 4, dashArray: "2 8", opacity: 0.9 }).addTo(routeLayer);
-    }
+    if (!leg.transit) pushRun(leg.poly.map(p => [p[1], p[0]]), "#8fa2a4", "walk");
   }
   for (const { v } of verdicts) {
     const refSide = v.side === "right" ? "right" : "left";
+    let run = null, runColor = null;
     for (const seg of v.detail) {
       const sunny = seg.w > 0.15 &&
         ((seg.sunRight && refSide === "right") || (!seg.sunRight && refSide === "left"));
-      L.polyline([seg.a, seg.b], {
-        color: seg.ug ? "#8fa2a4" : sunny ? "#f2a900" : "#1f7a63", weight: 5, opacity: 0.9,
-      }).addTo(routeLayer);
+      const color = seg.ug ? "#8fa2a4" : sunny ? "#f2a900" : "#1f7a63";
+      if (color !== runColor) {
+        pushRun(run, runColor, "transit");
+        run = [[seg.a[1], seg.a[0]]];
+        runColor = color;
+      }
+      run.push([seg.b[1], seg.b[0]]);
     }
+    pushRun(run, runColor, "transit");
   }
+  const applyRoute = () => {
+    const data = { type: "FeatureCollection", features };
+    if (map.getSource("route")) {
+      map.getSource("route").setData(data);
+    } else {
+      map.addSource("route", { type: "geojson", data });
+      map.addLayer({ id: "route-transit", type: "line", source: "route",
+        filter: ["!=", ["get", "kind"], "walk"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 0.9 } });
+      map.addLayer({ id: "route-walk", type: "line", source: "route",
+        filter: ["==", ["get", "kind"], "walk"],
+        paint: { "line-color": ["get", "color"], "line-width": 4,
+                 "line-opacity": 0.9, "line-dasharray": [0.5, 2] } });
+    }
+  };
+  if (map.isStyleLoaded()) applyRoute(); else map.once("load", applyRoute);
+  for (const m of routeMarkers) m.remove();
+  routeMarkers = [];
   if (allPts.length) {
-    L.circleMarker(allPts[0], { radius: 6, color: "#14333a", fillColor: "#fff", fillOpacity: 1 }).addTo(routeLayer);
-    L.circleMarker(allPts[allPts.length - 1], { radius: 6, color: "#14333a", fillColor: "#14333a", fillOpacity: 1 }).addTo(routeLayer);
-    map.fitBounds(L.latLngBounds(allPts), { padding: [24, 24] });
+    const dot = fill => {
+      const el = document.createElement("div");
+      el.style.cssText = "width:14px;height:14px;border-radius:50%;border:2.5px solid #14333a;background:" + fill;
+      return el;
+    };
+    const first = allPts[0], last = allPts[allPts.length - 1];
+    routeMarkers.push(new maplibregl.Marker({ element: dot("#ffffff") })
+      .setLngLat([first[1], first[0]]).addTo(map));
+    routeMarkers.push(new maplibregl.Marker({ element: dot("#14333a") })
+      .setLngLat([last[1], last[0]]).addTo(map));
+    const bounds = new maplibregl.LngLatBounds();
+    for (const p of allPts) bounds.extend([p[1], p[0]]);
+    map.fitBounds(bounds, { padding: 30, duration: 0 });
   }
-  setTimeout(() => map.invalidateSize(), 60);
+  setTimeout(() => map.resize(), 60);
 }
 
 async function run(e) {
   e.preventDefault();
   const toQ = $("to").value.trim(), fromQ = $("from").value.trim();
   if (!fromQ || !toQ) { setStatus("Fill in both a starting point and a destination.", true); return; }
+  const mode = document.querySelector('input[name="mode"]:checked').value;
   $("go").disabled = true;
   try {
-    setStatus("Planning your transit route…");
+    setStatus(mode === "car" ? "Finding the road route…" : "Planning your transit route…");
     const a = fromCoord || await geocode(fromQ);
     const b = await geocode(toQ);
     const depart = $("depart").value || new Date().toISOString();
-    let trip;
-    try {
-      trip = await planTransit(a, b, depart);
-      setStatus("");
-    } catch (err) {
-      if (err.message !== "noresult") throw err;
-      setStatus("No transit route found there — showing the road route instead.");
+    let trips = null;
+    if (mode === "car") {
       const r = await roadRoute(a, b);
       const start = new Date(depart);
-      trip = {
+      trips = [{
         start, end: new Date(start.getTime() + r.durationMin * 60000),
         legs: [{ transit: true, mode: "Road", name: "", headsign: "",
                  start, durationMin: r.durationMin, poly: r.poly }],
+      }];
+      setStatus("");
+    } else {
+      const filters = {
+        train: "SUBWAY,SUBURBAN,TRAM,RAIL,HIGHSPEED_RAIL,LONG_DISTANCE,NIGHT_RAIL,REGIONAL_FAST_RAIL,REGIONAL_RAIL",
+        bus: "BUS,COACH",
       };
+      try {
+        trips = await planTransit(a, b, depart, filters[mode]);
+        setStatus("");
+      } catch (err) {
+        if (err.message !== "noresult") throw err;
+        setStatus(`No ${mode} route found there — try another mode.`, true);
+      }
     }
-    await attachWeather(trip);
-    render(trip);
+    if (trips) await showTrips(trips);
   } catch (err) {
     if (String(err.message).startsWith("notfound:"))
       setStatus(`Couldn't find "${err.message.slice(9)}" — try adding the city name.`, true);
@@ -736,6 +816,34 @@ async function run(e) {
   $("go").disabled = false;
 }
 $("form").addEventListener("submit", run);
+
+/* ---------- itinerary picker ---------- */
+let currentTrips = [];
+async function showTrips(trips) {
+  currentTrips = trips;
+  const alts = $("alts");
+  alts.innerHTML = "";
+  alts.style.display = trips.length > 1 ? "flex" : "none";
+  trips.forEach((t, i) => {
+    const lines = t.legs.filter(l => l.transit).map(l => l.name || l.mode);
+    const changes = Math.max(0, lines.length - 1);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "alt";
+    btn.textContent = fmtTime(t.start) + " · " + (lines.join(" + ") || "walk") +
+      (changes ? ` · ${changes} change${changes > 1 ? "s" : ""}` : "") +
+      " · " + Math.round((t.end - t.start) / 60000) + " min";
+    btn.addEventListener("click", () => selectTrip(i));
+    alts.appendChild(btn);
+  });
+  await selectTrip(0);
+}
+async function selectTrip(i) {
+  [...$("alts").children].forEach((c, k) => c.classList.toggle("active", k === i));
+  const trip = currentTrips[i];
+  if (!trip.hourly) await attachWeather(trip);
+  render(trip);
+}
 
 /* PWA: register the service worker when served over http(s); harmless on file:// */
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
